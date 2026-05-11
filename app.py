@@ -13,6 +13,7 @@ Lance avec : streamlit run app.py
   7. ⏰ Automatisation    — planifier le lancement quotidien
 """
 
+import json
 import subprocess
 import sys
 import threading
@@ -36,6 +37,7 @@ from bot.database import (
     update_offers_status_batch,
 )
 from bot.secrets_manager import SECRETS_REGISTRY, SecretsManager
+from bot.api_guides import API_GUIDES
 
 # ---------------------------------------------------------------------------
 # Configuration Streamlit — doit être la première commande st.*
@@ -51,6 +53,7 @@ st.set_page_config(
 # Constantes
 # ---------------------------------------------------------------------------
 LOG_RUN_FILE = Path("logs/current_run.log")
+LAST_RUN_FILE = Path("data/last_run.json")
 STATUS_ORDER = list(STATUS_LABELS.keys())
 
 # ---------------------------------------------------------------------------
@@ -111,19 +114,27 @@ def _bot_worker(status: dict, log_path: Path) -> None:
     """
     log_path.parent.mkdir(parents=True, exist_ok=True)
     log_path.write_text("", encoding="utf-8")
-
-    with open(log_path, "w", encoding="utf-8", buffering=1) as f:
-        proc = subprocess.Popen(
-            [sys.executable, "main.py"],
-            stdout=f,
-            stderr=subprocess.STDOUT,
-            text=True,
-            cwd=str(Path(__file__).parent),
-        )
-        proc.wait()
-        status["returncode"] = proc.returncode
-
-    status["running"] = False
+    try:
+        with open(log_path, "w", encoding="utf-8", buffering=1) as f:
+            proc = subprocess.Popen(
+                [sys.executable, "main.py"],
+                stdout=f,
+                stderr=subprocess.STDOUT,
+                text=True,
+                cwd=str(Path(__file__).parent),
+            )
+            proc.wait()
+            status["returncode"] = proc.returncode
+    except Exception as e:
+        status["returncode"] = -1
+        try:
+            log_path.write_text(
+                f"Erreur au lancement du bot : {e}\n", encoding="utf-8"
+            )
+        except OSError:
+            pass
+    finally:
+        status["running"] = False
 
 
 def launch_bot() -> None:
@@ -151,6 +162,188 @@ def render_bot_log_box() -> None:
     content = LOG_RUN_FILE.read_text(encoding="utf-8").strip()
     if content:
         st.code(content, language=None)
+
+
+# ---------------------------------------------------------------------------
+# Run helpers — progression et résumé post-exécution
+# ---------------------------------------------------------------------------
+
+def _read_last_run() -> dict:
+    """Lit data/last_run.json écrit par main.py, ou {} si absent."""
+    try:
+        return json.loads(LAST_RUN_FILE.read_text(encoding="utf-8"))
+    except (FileNotFoundError, ValueError):
+        return {}
+
+
+def _render_run_progress(log_content: str, total_sources: int) -> None:
+    """Barre de progression + liste des sources déjà traitées."""
+    completed = [
+        ln.strip() for ln in log_content.splitlines()
+        if ln.strip().startswith(("✓ ", "✗ "))
+    ]
+    done = len(completed)
+    st.progress(
+        min(done / max(total_sources, 1), 0.99),
+        text=f"{done}/{total_sources} sources traitées",
+    )
+    for line in completed:
+        icon = "✅" if line.startswith("✓") else "❌"
+        parts = line.split()
+        name = parts[1] if len(parts) > 1 else line
+        offers = "?"
+        for i, p in enumerate(parts):
+            if p == "offres" and i > 0:
+                offers = parts[i - 1]
+                break
+        st.caption(f"{icon} **{name}** — {offers} offres")
+    if not completed:
+        st.caption("🔄 Démarrage en cours…")
+
+
+def _render_run_summary(result: dict, show_logs: bool) -> None:
+    """Résumé structuré après exécution réussie."""
+    if not result:
+        st.success("✅ Recherche terminée")
+        with st.expander("📋 Voir les logs", expanded=show_logs):
+            render_bot_log_box()
+        return
+
+    dur = result.get("duration", 0)
+    new_count = result.get("new_offers", 0)
+    total_found = result.get("total_found", 0)
+    dupes = max(0, total_found - new_count)
+
+    st.success(
+        f"✅ Terminée en **{dur:.0f}s** — "
+        f"**{new_count} nouvelles offres** ajoutées"
+    )
+
+    sources = result.get("sources", {})
+    if sources:
+        cols = st.columns(max(len(sources), 1))
+        for i, (name, stats) in enumerate(sources.items()):
+            with cols[i]:
+                ok = stats.get("success", 0)
+                no_r = stats.get("no_results", 0)
+                err = stats.get("errors", 0)
+                offers = stats.get("offers", 0)
+                header = f"⚠️ {name}" if err else name
+                detail = f"🔍 {offers} offres · ✓ {ok} ok"
+                if no_r:
+                    detail += f" · ○ {no_r} vide"
+                if err:
+                    detail += f" · ✗ {err} err"
+                st.markdown(f"**{header}**  \n{detail}")
+
+    st.markdown(
+        f"**Total :** {total_found} offres brutes → "
+        f"**{new_count} nouvelles** · {dupes} déjà connues"
+    )
+    with st.expander("📋 Logs techniques", expanded=show_logs):
+        render_bot_log_box()
+        debug = Path("logs/jobbot_debug.log")
+        if debug.exists():
+            st.caption(f"Logs détaillés : `{debug}`")
+
+
+# ---------------------------------------------------------------------------
+# Guides API — helpers pour page_secrets
+# ---------------------------------------------------------------------------
+
+def _guide_status_icon(group_key: str, sm: "SecretsManager") -> str:
+    """Retourne une icône de statut pour l'en-tête d'expander."""
+    guide = API_GUIDES.get(group_key)
+    if not guide:
+        return ""
+    if not guide["needs_key"]:
+        return "🆓"
+    all_set = (
+        all(sm.has(k) for k in guide["env_vars"])
+        if guide["env_vars"] else True
+    )
+    return "✅" if all_set else "⚠️"
+
+
+def _render_api_guide(group_key: str, sm: "SecretsManager") -> None:
+    """
+    Affiche le mini-tutoriel d'un service API à l'intérieur d'un expander.
+    Appelé au début de chaque section de la page Clés API.
+    """
+    guide = API_GUIDES.get(group_key)
+    if not guide:
+        return
+
+    # --- Bandeau de statut ---
+    if not guide["needs_key"]:
+        st.success(
+            "🆓 **Fonctionne sans clé** — active-la directement depuis "
+            "la page Sources."
+        )
+    else:
+        env_vars = guide["env_vars"]
+        if env_vars:
+            missing = [k for k in env_vars if not sm.has(k)]
+            if not missing:
+                st.success(
+                    "✅ **Configurée** — toutes les clés sont présentes."
+                )
+            else:
+                st.warning(
+                    f"⚠️ **Clé(s) manquante(s) :** {', '.join(missing)}"
+                )
+
+    # --- Description ---
+    cols = st.columns([3, 1, 1, 1])
+    cols[0].markdown(f"_{guide['purpose']}_")
+    cols[1].caption("🎁 Gratuite" if guide["free"] else "💳 Payante")
+    cols[2].caption(
+        "🔑 Clé requise" if guide["needs_key"] else "🆓 Sans inscription"
+    )
+    cols[3].caption(
+        "⭐ Recommandée" if guide["recommended"] else "➕ Optionnelle"
+    )
+
+    # --- Étapes (st.expander interdit dans un expander → <details> HTML) ---
+    if guide["steps"] and guide["steps"][0] != "Aucune configuration requise.":
+        items = "".join(
+            f"<li style='margin:4px 0'>{s}</li>"
+            for s in guide["steps"]
+        )
+        link = ""
+        if guide.get("signup_url"):
+            url = guide["signup_url"]
+            link = (
+                f'<p style="margin-top:8px">👉 '
+                f'<a href="{url}" target="_blank">'
+                f"Créer un compte / obtenir la clé</a></p>"
+            )
+        st.markdown(
+            f"<details><summary>"
+            f"<strong>📋 Comment obtenir la clé — étapes</strong>"
+            f"</summary><ol style='margin:8px 0 4px 16px'>"
+            f"{items}</ol>{link}</details>",
+            unsafe_allow_html=True,
+        )
+    elif guide["steps"]:
+        st.caption("ℹ️ Aucune configuration requise — prête à l'emploi.")
+
+    # --- Erreurs fréquentes ---
+    if guide.get("common_errors"):
+        rows = "".join(
+            f"<li style='margin:6px 0'>"
+            f"<strong>{e}</strong><br>"
+            f"<span style='color:#5f6368;font-size:13px'>{s}</span>"
+            f"</li>"
+            for e, s in guide["common_errors"]
+        )
+        st.markdown(
+            f"<details><summary>"
+            f"<strong>⚠️ Erreurs fréquentes et solutions</strong>"
+            f"</summary><ul style='margin:8px 0 4px 16px'>"
+            f"{rows}</ul></details>",
+            unsafe_allow_html=True,
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -248,21 +441,28 @@ def page_dashboard() -> None:
 
     # --- Auto-refresh pendant l'exécution ---
     status = st.session_state.get("bot_status", {})
+    ui_cfg = cfg.get_raw().get("ui", {})
+    show_logs = ui_cfg.get("show_logs_by_default", False)
+
     if status.get("running"):
-        st.markdown("##### 📝 Logs en direct")
-        render_bot_log_box()
+        n_sources = sum(
+            1 for s in SOURCE_META if cfg.is_source_enabled(s)
+        )
+        log_content = (
+            LOG_RUN_FILE.read_text(encoding="utf-8")
+            if LOG_RUN_FILE.exists() else ""
+        )
+        _render_run_progress(log_content, n_sources)
         time.sleep(2)
         st.rerun()
     elif status.get("returncode") is not None:
         rc = status["returncode"]
         if rc == 0:
-            st.success("✅ Recherche terminée avec succès !")
+            _render_run_summary(_read_last_run(), show_logs)
         else:
             st.error(f"❌ La recherche a échoué (code {rc})")
-        if LOG_RUN_FILE.exists():
-            with st.expander("📝 Voir les logs"):
+            with st.expander("📋 Voir les logs", expanded=True):
                 render_bot_log_box()
-        # Nettoyer pour ne pas réafficher à chaque rerun
         st.session_state["bot_running"] = False
 
     st.markdown("---")
@@ -578,7 +778,14 @@ def page_secrets() -> None:
     # Formulaire par groupe
     for group_key, keys in groups.items():
         label = group_labels.get(group_key, group_key)
-        with st.expander(f"**{label}**", expanded=False):
+        icon = _guide_status_icon(group_key, sm)
+        with st.expander(f"{icon} **{label}**", expanded=False):
+
+            # Mini-tutoriel intégré
+            _render_api_guide(group_key, sm)
+            st.divider()
+
+            # Champs de saisie des secrets
             new_values: dict[str, str] = {}
             has_changes = False
 
@@ -591,7 +798,8 @@ def page_secrets() -> None:
                 with col_label:
                     st.markdown(
                         f"**{meta['label']}**  \n"
-                        f"<small style='color:#5f6368'>{meta['description']}</small>",
+                        f"<small style='color:#5f6368'>"
+                        f"{meta['description']}</small>",
                         unsafe_allow_html=True,
                     )
                     if already_set:
@@ -648,29 +856,46 @@ def page_secrets() -> None:
                     )
                     st.rerun()
 
+            # Bouton de test contextuel (SMTP et IMAP seulement)
+            if group_key == "email_smtp":
+                st.markdown("")
+                if st.button(
+                    "📤 Tester l'envoi email (SMTP)",
+                    key="test_smtp_btn",
+                ):
+                    with st.spinner("Connexion SMTP en cours…"):
+                        ok, msg = sm.test_smtp()
+                    st.success(msg) if ok else st.error(msg)
+
+            elif group_key == "email_alerts":
+                st.markdown("")
+                if st.button(
+                    "📥 Tester la connexion IMAP",
+                    key="test_imap_btn",
+                ):
+                    with st.spinner("Connexion IMAP en cours…"):
+                        ok, msg = sm.test_imap()
+                    st.success(msg) if ok else st.error(msg)
+
+    # ------------------------------------------------------------------
+    # Sources sans inscription requise (The Muse)
+    # Absentes de SECRETS_REGISTRY car elles ne nécessitent aucune clé.
+    # ------------------------------------------------------------------
     st.markdown("---")
+    st.markdown("### 🆓 Sources sans clé API")
+    st.caption(
+        "Ces sources fonctionnent immédiatement, sans inscription. "
+        "Active-les depuis la page Sources."
+    )
 
-    # Tester la configuration
-    st.markdown("### 🔬 Tester la configuration")
-    col1, col2 = st.columns(2)
-
-    with col1:
-        if st.button("📤 Tester l'envoi email (SMTP)"):
-            with st.spinner("Test SMTP…"):
-                ok, msg = sm.test_smtp()
-            if ok:
-                st.success(msg)
-            else:
-                st.error(msg)
-
-    with col2:
-        if st.button("📥 Tester la connexion IMAP"):
-            with st.spinner("Test IMAP…"):
-                ok, msg = sm.test_imap()
-            if ok:
-                st.success(msg)
-            else:
-                st.error(msg)
+    muse_meta = SOURCE_META.get("themuse", {})
+    muse_enabled = get_cfg().is_source_enabled("themuse")
+    muse_status = "✅ Activée" if muse_enabled else "⏸️ Désactivée"
+    with st.expander(
+        f"🆓 **{muse_meta.get('label', 'The Muse')}** — {muse_status}",
+        expanded=False,
+    ):
+        _render_api_guide("themuse", sm)
 
 
 # ===========================================================================

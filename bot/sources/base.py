@@ -34,6 +34,8 @@ class JobSource(ABC):
         self.source_config = config.get("sources", {}).get(self.name, {})
         # Limite de résultats par mot-clé (protège les quotas API)
         self.max_results = self.source_config.get("max_results_per_keyword", 25)
+        # Rempli par search() — lu par source_loader pour le résumé console
+        self.stats: dict = {}
 
     @abstractmethod
     def search(self, keywords: list[str], locations: list[dict]) -> list[JobOffer]:

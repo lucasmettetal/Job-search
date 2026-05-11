@@ -12,8 +12,10 @@ Pipeline :
   8. Envoyer l'email
 """
 
+import json
 import logging
 import sys
+import time
 from pathlib import Path
 
 import yaml
@@ -31,27 +33,49 @@ from bot.models import JobOffer
 
 def setup_logging(config: dict) -> None:
     log_cfg = config.get("logging", {})
-    level = getattr(
-        logging,
-        log_cfg.get("level", "INFO").upper(),
-        logging.INFO,
-    )
+    verbose = log_cfg.get("verbose", False)
     log_file = log_cfg.get("file", "logs/bot.log")
-    Path(log_file).parent.mkdir(parents=True, exist_ok=True)
+    debug_file = log_cfg.get("debug_file", "")
 
     fmt = "%(asctime)s [%(levelname)s] %(name)s: %(message)s"
-    handlers = [
-        logging.StreamHandler(sys.stdout),
-        logging.FileHandler(log_file, encoding="utf-8"),
-    ]
-    logging.basicConfig(
-        level=level, format=fmt, datefmt="%H:%M:%S", handlers=handlers
-    )
+    formatter = logging.Formatter(fmt, datefmt="%H:%M:%S")
+
+    console = logging.StreamHandler(sys.stdout)
+    console.setLevel(logging.DEBUG if verbose else logging.INFO)
+    console.setFormatter(formatter)
+
+    Path(log_file).parent.mkdir(parents=True, exist_ok=True)
+    main_fh = logging.FileHandler(log_file, encoding="utf-8")
+    main_fh.setLevel(logging.INFO)
+    main_fh.setFormatter(formatter)
+
+    handlers: list[logging.Handler] = [console, main_fh]
+
+    if debug_file:
+        Path(debug_file).parent.mkdir(parents=True, exist_ok=True)
+        dbg_fh = logging.FileHandler(
+            debug_file, encoding="utf-8", mode="w"
+        )
+        dbg_fh.setLevel(logging.DEBUG)
+        dbg_fh.setFormatter(formatter)
+        handlers.append(dbg_fh)
+
+    logging.basicConfig(level=logging.DEBUG, handlers=handlers)
 
 
 def load_config(path: str = "config.yaml") -> dict:
-    with open(path, encoding="utf-8") as f:
-        return yaml.safe_load(f)
+    try:
+        with open(path, encoding="utf-8") as f:
+            return yaml.safe_load(f) or {}
+    except FileNotFoundError:
+        print(
+            f"[ERREUR] Fichier '{path}' introuvable.\n"
+            "  → Lance l'interface pour créer la config :\n"
+            "      streamlit run app.py\n"
+            "  → ou copie et adapte config.yaml manuellement",
+            file=sys.stderr,
+        )
+        sys.exit(1)
 
 
 def rows_to_offers(rows: list[dict]) -> list[JobOffer]:
@@ -77,6 +101,7 @@ def rows_to_offers(rows: list[dict]) -> list[JobOffer]:
 def run(config: dict) -> None:
     logger = logging.getLogger(__name__)
     sep = "=" * 55
+    _run_start = time.time()
 
     logger.info(sep)
     logger.info("  JobBot V2 — Démarrage")
@@ -103,7 +128,7 @@ def run(config: dict) -> None:
 
     # 3. Récupérer toutes les offres
     # fetch_all_sources retourne aussi le nb d'offres par source
-    raw_offers, source_counts = fetch_all_sources(
+    raw_offers, source_counts, failed_sources = fetch_all_sources(
         sources, keywords, locations
     )
 
@@ -159,11 +184,34 @@ def run(config: dict) -> None:
         config=config.get("email", {}),
     )
 
+    # Résumé JSON pour l'interface Streamlit
+    _result = {
+        "success": True,
+        "duration": round(time.time() - _run_start, 1),
+        "new_offers": new_count,
+        "total_found": sum(source_counts.values()),
+        "in_report": len(recent_rows),
+        "sources": {s.name: s.stats for s in sources},
+    }
+    try:
+        _result_path = Path(db_path).parent / "last_run.json"
+        _result_path.parent.mkdir(parents=True, exist_ok=True)
+        _result_path.write_text(
+            json.dumps(_result, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+    except OSError:
+        pass
+
     logger.info(sep)
     status = "Email envoyé ✓" if email_sent else "Email non envoyé"
     logger.info(
         f"  Terminé — {new_count} nouvelles offres — {status}"
     )
+    if failed_sources:
+        logger.warning(
+            f"  Sources en erreur : {', '.join(failed_sources)}"
+        )
     logger.info(sep)
 
 

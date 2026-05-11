@@ -61,8 +61,11 @@ def compute_content_hash(
 
 def get_connection(db_path: str) -> sqlite3.Connection:
     Path(db_path).parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(db_path)
+    conn = sqlite3.connect(db_path, timeout=10)
     conn.row_factory = sqlite3.Row
+    # WAL permet à un lecteur et un écrivain de coexister sans blocage.
+    # Nécessaire car Streamlit et le thread bot accèdent à la DB en parallèle.
+    conn.execute("PRAGMA journal_mode=WAL")
     return conn
 
 
@@ -197,8 +200,50 @@ def save_offer(db_path: str, offer: "JobOffer") -> bool:
 
 
 def save_offers(db_path: str, offers: list) -> int:
-    """Sauvegarde une liste d'offres. Retourne le nombre de nouvelles."""
-    new_count = sum(1 for o in offers if save_offer(db_path, o))
+    """
+    Sauvegarde une liste d'offres en une seule transaction.
+    Retourne le nombre de nouvelles offres insérées.
+    """
+    if not offers:
+        return 0
+
+    conn = get_connection(db_path)
+    new_count = 0
+    try:
+        for offer in offers:
+            # Niveau 1 : ID exact
+            if conn.execute(
+                "SELECT 1 FROM offers WHERE id = ?", (offer.id,)
+            ).fetchone():
+                continue
+
+            # Niveau 2 : hash contenu
+            h = compute_content_hash(
+                offer.title, offer.company or "", offer.location or ""
+            )
+            if conn.execute(
+                "SELECT 1 FROM offers WHERE content_hash = ?", (h,)
+            ).fetchone():
+                continue
+
+            conn.execute("""
+                INSERT OR IGNORE INTO offers
+                    (id, content_hash, title, company, location, contract,
+                     salary, description, url, source, score,
+                     published_at, found_at, status)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'new')
+            """, (
+                offer.id, h, offer.title, offer.company,
+                offer.location, offer.contract, offer.salary,
+                offer.description, offer.url, offer.source, offer.score,
+                offer.published_at, datetime.now().isoformat(),
+            ))
+            new_count += 1
+
+        conn.commit()
+    finally:
+        conn.close()
+
     logger.info(
         f"{new_count}/{len(offers)} nouvelles offres sauvegardées"
     )
@@ -319,9 +364,7 @@ def get_offers_filtered(
             params.extend(statuses)
 
         if location_kw:
-            query += (
-                " AND (location LIKE ? OR location IS NULL)"
-            )
+            query += " AND location LIKE ?"
             params.append(f"%{location_kw}%")
 
         if search_kw:

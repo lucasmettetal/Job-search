@@ -28,6 +28,8 @@ from bot.sources.brave_search import BraveSearchSource
 
 logger = logging.getLogger(__name__)
 
+_SEP = "─" * 54
+
 # Registre : nom dans config.yaml → classe Python
 SOURCE_REGISTRY: dict[str, type[JobSource]] = {
     "france_travail": FranceTravailSource,
@@ -80,45 +82,71 @@ def load_sources(config: dict) -> list[JobSource]:
     return active
 
 
+def _log_source_summary(
+    name: str, stats: dict, elapsed: float
+) -> None:
+    req = stats.get("requests", 0)
+    ok = stats.get("success", 0)
+    no_r = stats.get("no_results", 0)
+    err = stats.get("errors", 0)
+    n = stats.get("offers", 0)
+    codes = stats.get("error_codes", "")
+    diag = stats.get("diagnosis", "")
+
+    mark = "✓" if not err else "✗"
+    parts = [
+        f"{mark} {name:<20}",
+        f"{req:>3} req",
+        f"{ok:>3} ok",
+    ]
+    if no_r:
+        parts.append(f"{no_r:>3} sans résultat")
+    parts += [f"{err:>3} err", f"{n:>4} offres", f"{elapsed:.1f}s"]
+    logger.info("  ".join(parts))
+    if err and (codes or diag):
+        detail = (
+            f"{codes} — {diag}" if (codes and diag) else codes or diag
+        )
+        logger.warning(f"  └─ {detail[:120]}")
+
+
 def fetch_all_sources(
     sources: list[JobSource],
     keywords: list[str],
     locations: list[dict],
-) -> tuple[list[JobOffer], dict[str, int]]:
+) -> tuple[list[JobOffer], dict[str, int], list[str]]:
     """
     Lance la recherche sur toutes les sources.
 
     Retourne :
       - La liste complète des offres (toutes sources confondues)
       - Un dict {nom_source: nb_offres} pour le résumé email
-
-    La boucle est protégée : si une source lève une exception,
-    on log l'erreur et on continue avec les suivantes.
+      - Une liste des noms de sources qui ont levé une exception
     """
     all_offers: list[JobOffer] = []
     counts: dict[str, int] = {}
+    failed: list[str] = []
 
+    logger.info(_SEP)
     for source in sources:
-        logger.info(f"--- Interrogation de '{source.name}' ---")
         start = time.time()
         try:
             offers = source.search(keywords, locations)
             elapsed = time.time() - start
             counts[source.name] = len(offers)
             all_offers.extend(offers)
-            logger.info(
-                f"'{source.name}' : {len(offers)} offres "
-                f"en {elapsed:.1f}s"
-            )
+            _log_source_summary(source.name, source.stats, elapsed)
         except Exception as e:
             elapsed = time.time() - start
             counts[source.name] = 0
+            failed.append(source.name)
             logger.error(
-                f"'{source.name}' a planté après {elapsed:.1f}s : {e}",
+                f"✗ {source.name} a planté après {elapsed:.1f}s : {e}",
                 exc_info=True,
             )
-
+    logger.info(_SEP)
     logger.info(
-        f"Total toutes sources : {len(all_offers)} offres brutes"
+        f"Total : {len(all_offers)} offres brutes "
+        f"sur {len(sources)} source(s)"
     )
-    return all_offers, counts
+    return all_offers, counts, failed
