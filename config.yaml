@@ -1,0 +1,143 @@
+# ============================================================
+#  Configuration du bot de recherche d'emploi - Lucas Mettetal
+#  V3 : Multi-sources + Alertes email + Dashboard Streamlit
+# ============================================================
+
+search:
+  keywords:
+    - "administrateur système"
+    - "admin système"
+    - "technicien systèmes réseaux"
+    - "technicien informatique"
+    - "support informatique"
+    - "technicien support"
+    - "cybersécurité junior"
+    - "analyste SOC"
+    - "alternance cybersécurité"
+    - "technicien sécurité informatique"
+
+  locations:
+    - name: "Caussade"
+      commune_code: "82033"
+    - name: "Montauban"
+      commune_code: "82121"
+    - name: "Toulouse"
+      commune_code: "31555"
+
+  distance_km: 30
+  contract_types:
+    - CDI
+    - CDD
+    - ALT
+    - MIS
+
+  days_published: 7
+  include_remote: true
+
+# ============================================================
+#  Sources
+# ============================================================
+sources:
+
+  france_travail:
+    enabled: true
+    max_results_per_keyword: 50
+    # Clés : FRANCE_TRAVAIL_CLIENT_ID + FRANCE_TRAVAIL_CLIENT_SECRET
+    # → https://francetravail.io/inscription
+
+  adzuna:
+    enabled: false
+    max_results_per_keyword: 25
+    # Clés : ADZUNA_APP_ID + ADZUNA_APP_KEY
+    # → https://developer.adzuna.com/signup (250 req/jour)
+
+  jooble:
+    enabled: false
+    max_results_per_keyword: 20
+    # Clé : JOOBLE_API_KEY
+    # → https://jooble.org/api/about (~500 req/mois)
+
+  careerjet:
+    enabled: true              # Gratuit sans clé
+    max_results_per_keyword: 20
+
+  themuse:
+    enabled: false             # Remote/international seulement
+    max_results_per_keyword: 30
+
+  brave_search:
+    enabled: false
+    max_results_per_keyword: 15
+    # Clé : BRAVE_API_KEY
+    # → https://brave.com/search/api/ (2000 req/mois)
+
+  email_alerts:
+    enabled: false             # Passe à true après config IMAP
+    # -------- Configuration IMAP --------
+    # Depuis combien de jours relire les emails ?
+    days_back: 2
+    # Marquer les emails traités comme "lus" ?
+    mark_as_read: false
+    # Dossier IMAP à surveiller (INBOX par défaut)
+    mailbox: "INBOX"
+    # Clés : IMAP_EMAIL + IMAP_PASSWORD (+ IMAP_HOST si pas Gmail)
+    #
+    # ÉTAPES DE CONFIGURATION :
+    # 1. Active IMAP dans Gmail :
+    #    Gmail → Paramètres → Voir tous les paramètres →
+    #    Transfert et POP/IMAP → Activer IMAP
+    # 2. Crée un mot de passe d'application Gmail :
+    #    Compte Google → Sécurité → Mots de passe des applications
+    # 3. Configure les alertes sur chaque site emploi :
+    #    LinkedIn  : linkedin.com/jobs → "Alertes emploi"
+    #    Indeed    : fr.indeed.com → "Créer une alerte"
+    #    HelloWork : hellowork.com → "Créer une alerte"
+    #    WTTJ      : welcometothejungle.com → "Mes alertes"
+    #    APEC      : apec.fr → "Créer une alerte offre"
+
+# ============================================================
+#  Scoring
+# ============================================================
+scoring:
+  weights:
+    title_keyword_match: 4
+    desc_keyword_match: 1
+    junior_bonus: 2
+    remote_bonus: 1
+    alternance_bonus: 2
+    cyber_bonus: 3
+    experience_penalty: -3
+
+  min_score: 2
+
+# ============================================================
+#  Email quotidien
+# ============================================================
+email:
+  recipient: "ton.email@exemple.com"
+  subject: "[JobBot] {nb_offres} nouvelles offres - {date}"
+  max_offers_in_email: 25
+  min_offers_to_send: 1
+
+# ============================================================
+#  Base de données
+# ============================================================
+database:
+  path: "data/jobs.db"
+
+# ============================================================
+#  Interface web Streamlit
+# ============================================================
+app:
+  title: "JobBot Dashboard"
+  # Chemin vers la base (peut différer du bot si besoin)
+  db_path: "data/jobs.db"
+  # Nombre d'offres à afficher par page
+  page_size: 50
+
+# ============================================================
+#  Logs
+# ============================================================
+logging:
+  level: "INFO"
+  file: "logs/bot.log"

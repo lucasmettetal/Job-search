@@ -1,0 +1,22 @@
+# ============================================================
+#  Dépendances Python — JobBot V3
+#  Installation : pip install -r requirements.txt
+# ============================================================
+
+# Chargement des variables d'environnement (.env)
+python-dotenv==1.0.1
+
+# Requêtes HTTP (appels API)
+requests==2.32.3
+
+# Parsing du fichier config.yaml
+PyYAML==6.0.2
+
+# Parsing HTML des emails d'alerte (email_alerts.py)
+beautifulsoup4==4.12.3
+
+# Interface web (dashboard)
+streamlit==1.45.0
+
+# Manipulation de données (tableaux dans Streamlit)
+pandas==2.2.3
