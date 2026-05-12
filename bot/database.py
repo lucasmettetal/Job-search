@@ -199,16 +199,17 @@ def save_offer(db_path: str, offer: "JobOffer") -> bool:
         conn.close()
 
 
-def save_offers(db_path: str, offers: list) -> int:
+def save_offers(db_path: str, offers: list) -> tuple[int, list]:
     """
     Sauvegarde une liste d'offres en une seule transaction.
-    Retourne le nombre de nouvelles offres insérées.
+    Retourne (nombre de nouvelles offres insérées, liste des nouvelles offres).
     """
     if not offers:
-        return 0
+        return 0, []
 
     conn = get_connection(db_path)
     new_count = 0
+    new_offers: list = []
     try:
         for offer in offers:
             # Niveau 1 : ID exact
@@ -239,6 +240,7 @@ def save_offers(db_path: str, offers: list) -> int:
                 offer.published_at, datetime.now().isoformat(),
             ))
             new_count += 1
+            new_offers.append(offer)
 
         conn.commit()
     finally:
@@ -247,7 +249,7 @@ def save_offers(db_path: str, offers: list) -> int:
     logger.info(
         f"{new_count}/{len(offers)} nouvelles offres sauvegardées"
     )
-    return new_count
+    return new_count, new_offers
 
 
 def update_offer_status(

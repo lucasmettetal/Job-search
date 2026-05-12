@@ -14,6 +14,7 @@ Gestion des erreurs :
 """
 
 import logging
+import os
 import time
 from typing import Optional
 
@@ -29,6 +30,17 @@ from bot.sources.brave_search import BraveSearchSource
 logger = logging.getLogger(__name__)
 
 _SEP = "─" * 54
+
+# Variables .env attendues par chaque source — pour le diagnostic de skip
+_SOURCE_ENV_VARS: dict[str, list[str]] = {
+    "france_travail": [
+        "FRANCE_TRAVAIL_CLIENT_ID", "FRANCE_TRAVAIL_CLIENT_SECRET",
+    ],
+    "adzuna":       ["ADZUNA_APP_ID", "ADZUNA_APP_KEY"],
+    "jooble":       ["JOOBLE_API_KEY"],
+    "brave_search": ["BRAVE_API_KEY"],
+    "email_alerts": ["IMAP_EMAIL", "IMAP_PASSWORD"],
+}
 
 # Registre : nom dans config.yaml → classe Python
 SOURCE_REGISTRY: dict[str, type[JobSource]] = {
@@ -53,30 +65,36 @@ def load_sources(config: dict) -> list[JobSource]:
     sources_cfg = config.get("sources", {})
     active: list[JobSource] = []
 
+    logger.info("État des sources :")
     for name, cls in SOURCE_REGISTRY.items():
         src_cfg = sources_cfg.get(name, {})
-
-        # Par défaut, france_travail est activée, les autres non
         default_enabled = name == "france_travail"
-        if not src_cfg.get("enabled", default_enabled):
-            logger.debug(f"Source désactivée : {name}")
+        enabled = src_cfg.get("enabled", default_enabled)
+
+        if not enabled:
+            logger.info(f"  ✗ {name:<22} désactivée")
             continue
 
         source = cls(config)
         if not source.is_available():
-            logger.warning(
-                f"Source '{name}' activée mais non disponible "
-                f"(clés API manquantes dans .env)"
+            expected = _SOURCE_ENV_VARS.get(name, [])
+            missing = [v for v in expected if not os.getenv(v)]
+            reason = (
+                f"{', '.join(missing)} manquant(s) dans .env"
+                if missing else "non disponible"
             )
+            logger.info(f"  ✗ {name:<22} ignorée — {reason}")
             continue
 
+        expected = _SOURCE_ENV_VARS.get(name, [])
+        note = "aucune clé requise" if not expected else "clés présentes"
+        logger.info(f"  ✓ {name:<22} chargée ({note})")
         active.append(source)
-        logger.info(f"Source chargée : {name}")
 
     if not active:
         logger.error(
-            "Aucune source disponible ! "
-            "Vérifie les clés API dans .env et config.yaml"
+            "Aucune source disponible — "
+            "vérifie les clés API dans .env et config.yaml"
         )
 
     return active

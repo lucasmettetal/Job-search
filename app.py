@@ -247,6 +247,103 @@ def _render_run_summary(result: dict, show_logs: bool) -> None:
             st.caption(f"Logs détaillés : `{debug}`")
 
 
+def _render_new_offers_preview(result: dict) -> None:
+    """Affiche les nouvelles offres ajoutées lors du dernier run."""
+    preview = result.get("new_offers_preview", [])
+    new_count = result.get("new_offers", 0)
+    if not preview:
+        if new_count == 0:
+            st.info("Aucune nouvelle offre lors de ce run.")
+        return
+
+    st.markdown("#### 🆕 Nouvelles offres ajoutées")
+    shown = preview[:10]
+    for offer in shown:
+        title = offer.get("title", "")
+        company = offer.get("company", "") or ""
+        location = offer.get("location", "") or ""
+        source = offer.get("source", "")
+        score = offer.get("score", 0)
+        url = offer.get("url", "#") or "#"
+        meta_parts = [p for p in [company, location, source] if p]
+        meta = " · ".join(meta_parts)
+        st.markdown(
+            f"**{'★' * min(score // 2, 5) or '☆'}** "
+            f"[{title}]({url})"
+            + (f" — <small style='color:#5f6368'>{meta}</small>" if meta else ""),
+            unsafe_allow_html=True,
+        )
+    if new_count > 10:
+        st.caption(f"+ {new_count - 10} autres offres — voir l'onglet Offres")
+
+
+# ---------------------------------------------------------------------------
+# Test rapide d'une source API
+# ---------------------------------------------------------------------------
+
+def _test_source_api(
+    name: str, sm: "SecretsManager", cfg: "ConfigManager"
+) -> tuple[bool, str]:
+    """
+    Lance une mini-recherche (1 mot-clé, Toulouse) pour tester une source.
+    Retourne (ok, message lisible).
+    """
+    from dotenv import load_dotenv
+    load_dotenv()
+
+    status = sm.status_for_source(name)
+    if not status["configured"]:
+        missing = ", ".join(status["missing"])
+        return False, f"Clés manquantes dans .env : {missing}"
+
+    raw = cfg.get_raw()
+    raw.setdefault("search", {})["include_remote"] = False
+
+    try:
+        if name == "france_travail":
+            from bot.sources.france_travail import FranceTravailSource as Cls
+        elif name == "adzuna":
+            from bot.sources.adzuna import AdzunaSource as Cls
+        elif name == "jooble":
+            from bot.sources.jooble import JoobleSource as Cls
+        elif name == "brave_search":
+            from bot.sources.brave_search import BraveSearchSource as Cls
+        else:
+            return False, "Test non disponible pour cette source"
+
+        src = Cls(raw)
+        if not src.is_available():
+            return False, "Clés API non reconnues (vérifie .env)"
+
+        offers = src.search(
+            ["informatique"],
+            [{"name": "Toulouse", "commune_code": "31555"}],
+        )
+        stats = getattr(src, "stats", {})
+        n = len(offers)
+        err = stats.get("errors", 0)
+
+        if err and n == 0:
+            codes = stats.get("error_codes", "")
+            diag = stats.get("diagnosis", "")
+            detail = (
+                f"{codes} — {diag}" if (codes and diag)
+                else codes or diag or "erreur API"
+            )
+            return False, f"Erreur API : {detail[:120]}"
+
+        if n == 0:
+            return True, (
+                "API fonctionnelle — 0 offre trouvée "
+                "(normal pour un test ponctuel)"
+            )
+        return True, (
+            f"{n} offre(s) trouvée(s) pour « informatique » à Toulouse"
+        )
+    except Exception as e:
+        return False, f"Erreur : {e}"
+
+
 # ---------------------------------------------------------------------------
 # Guides API — helpers pour page_secrets
 # ---------------------------------------------------------------------------
@@ -458,7 +555,10 @@ def page_dashboard() -> None:
     elif status.get("returncode") is not None:
         rc = status["returncode"]
         if rc == 0:
-            _render_run_summary(_read_last_run(), show_logs)
+            last_run = _read_last_run()
+            _render_run_summary(last_run, show_logs)
+            if last_run:
+                _render_new_offers_preview(last_run)
         else:
             st.error(f"❌ La recherche a échoué (code {rc})")
             with st.expander("📋 Voir les logs", expanded=True):
@@ -640,6 +740,48 @@ def page_sources() -> None:
 
     cfg = get_cfg()
     sm = get_sm()
+    last_run = _read_last_run()
+    last_run_sources = set(last_run.get("sources", {}).keys())
+
+    # ── Tableau récapitulatif ──────────────────────────────────────────
+    rows = []
+    for name, meta in SOURCE_META.items():
+        enabled = cfg.is_source_enabled(name)
+        secret_status = sm.status_for_source(name)
+        requires = meta.get("requires", [])
+        configured = not requires or secret_status["configured"]
+        in_last_run = name in last_run_sources
+        last_stats = last_run.get("sources", {}).get(name, {})
+
+        clés_col = "—" if not requires else (
+            "✅" if configured
+            else "❌ " + ", ".join(secret_status["missing"])
+        )
+
+        if not enabled:
+            diag = "Désactivée"
+        elif not configured:
+            diag = "Manque : " + ", ".join(secret_status["missing"])
+        elif in_last_run:
+            diag = f"Active — {last_stats.get('offers', 0)} offres"
+        else:
+            diag = "Prête (pas encore utilisée ce run)"
+
+        rows.append({
+            "Source": f"{meta['emoji']} {meta['label']}",
+            "Act.": "✅" if enabled else "⏸️",
+            "Clés API": clés_col,
+            "Dernier run": (
+                "✓" if in_last_run
+                else ("✗" if last_run_sources else "—")
+            ),
+            "Diagnostic": diag,
+        })
+    st.dataframe(
+        pd.DataFrame(rows), hide_index=True, use_container_width=True
+    )
+    st.markdown("---")
+    # ── Cartes interactives ───────────────────────────────────────────
 
     for name, meta in SOURCE_META.items():
         with st.container():
@@ -658,8 +800,7 @@ def page_sources() -> None:
                 status_badge = "✅ Configurée"
                 status_color = "badge-ok"
             else:
-                missing = ", ".join(secret_status["missing"])
-                status_badge = f"⚠️ Clé(s) manquante(s)"
+                status_badge = "⚠️ Clé(s) manquante(s)"
                 status_color = "badge-warn"
 
             if not enabled:
@@ -689,6 +830,12 @@ def page_sources() -> None:
                 elif not secret_status["configured"]:
                     missing = secret_status["missing"]
                     st.caption(f"Manque : {', '.join(missing)}")
+                # Indicateur dernier run
+                if enabled and last_run_sources:
+                    if name in last_run_sources:
+                        st.caption("✓ active au dernier run")
+                    else:
+                        st.caption("✗ ignorée au dernier run")
 
             with col_max:
                 src_cfg = cfg.get_source_config(name)
@@ -856,8 +1003,30 @@ def page_secrets() -> None:
                     )
                     st.rerun()
 
-            # Bouton de test contextuel (SMTP et IMAP seulement)
-            if group_key == "email_smtp":
+            # Bouton de test contextuel
+            _API_TEST_SOURCES = {
+                "france_travail": "🇫🇷 Tester France Travail",
+                "adzuna":         "🔍 Tester Adzuna",
+                "jooble":         "🌐 Tester Jooble",
+                "brave_search":   "🦁 Tester Brave Search",
+            }
+            if group_key in _API_TEST_SOURCES:
+                st.markdown("")
+                if st.button(
+                    _API_TEST_SOURCES[group_key],
+                    key=f"test_{group_key}_btn",
+                ):
+                    label = group_labels.get(group_key, group_key)
+                    with st.spinner(
+                        f"Test {label} en cours "
+                        f"(« informatique » à Toulouse)…"
+                    ):
+                        ok, msg = _test_source_api(
+                            group_key, sm, get_cfg()
+                        )
+                    st.success(msg) if ok else st.error(msg)
+
+            elif group_key == "email_smtp":
                 st.markdown("")
                 if st.button(
                     "📤 Tester l'envoi email (SMTP)",
@@ -914,6 +1083,17 @@ def page_offers() -> None:
         st.error(f"Base de données inaccessible : {e}")
         return
 
+    # --- Filtre rapide "aujourd'hui" ---
+    today_only = st.session_state.get("offers_today_filter", False)
+    col_today, _ = st.columns([2, 5])
+    with col_today:
+        if st.button(
+            "📅 Voir les offres ajoutées aujourd'hui",
+            type="secondary" if not today_only else "primary",
+        ):
+            st.session_state["offers_today_filter"] = not today_only
+            st.rerun()
+
     # --- Filtres ---
     with st.expander("🔽 Filtres", expanded=True):
         fc1, fc2, fc3, fc4, fc5 = st.columns(5)
@@ -943,14 +1123,25 @@ def page_offers() -> None:
         limit=500,
     )
 
+    if today_only:
+        today_str = datetime.now().strftime("%Y-%m-%d")
+        rows = [
+            r for r in rows
+            if (r.get("found_at") or "").startswith(today_str)
+        ]
+
     if not rows:
-        st.info(
+        msg = (
+            "Aucune offre ajoutée aujourd'hui."
+            if today_only else
             "Aucune offre pour ces filtres. "
             "Lance le bot depuis le tableau de bord."
         )
+        st.info(msg)
         return
 
-    st.caption(f"{len(rows)} offre(s)")
+    label = "aujourd'hui" if today_only else "offre(s)"
+    st.caption(f"{len(rows)} {label}")
 
     df = pd.DataFrame(rows)
     display_cols = [
@@ -1122,7 +1313,7 @@ def page_email_alerts() -> None:
                         raw_cfg["sources"]["email_alerts"]["enabled"] = True
                         source = EmailAlertsSource(raw_cfg)
                         offers = source.search(cfg.keywords, cfg.locations)
-                        new_count = save_offers(cfg.db_path, offers)
+                        new_count, _ = save_offers(cfg.db_path, offers)
                         st.success(
                             f"✅ {len(offers)} offre(s) extraite(s) — "
                             f"{new_count} nouvelle(s) en base"

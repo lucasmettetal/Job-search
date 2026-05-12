@@ -1,0 +1,27 @@
+{
+  "success": true,
+  "duration": 32.9,
+  "new_offers": 1,
+  "total_found": 81,
+  "in_report": 41,
+  "sources": {
+    "france_travail": {
+      "requests": 35,
+      "success": 15,
+      "no_results": 15,
+      "errors": 5,
+      "error_codes": "HTTP 400 ×5",
+      "diagnosis": "typeContrat invalide (CDI,CDD,ALT,MIS) — essaie CDI,CDD,MIS uniquement",
+      "offers": 81
+    },
+    "careerjet": {
+      "requests": 30,
+      "success": 30,
+      "no_results": 0,
+      "errors": 0,
+      "error_codes": "",
+      "diagnosis": "",
+      "offers": 0
+    }
+  }
+}

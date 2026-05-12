@@ -36,7 +36,7 @@ from bot.sources.base import JobSource
 
 logger = logging.getLogger(__name__)
 
-BASE_URL = "https://public.api.careerjet.net/search"
+BASE_URL = "http://public.api.careerjet.net/search"  # HTTPS non supporté
 
 
 class CareerjetSource(JobSource):
@@ -44,9 +44,13 @@ class CareerjetSource(JobSource):
 
     def __init__(self, config: dict):
         super().__init__(config)
-        # Optionnel : affiliate ID (laisser vide si pas de compte)
         import os
         self.affid = os.getenv("CAREERJET_AFFID", "")
+        self._req_count = 0
+        self._req_ok = 0
+        self._req_err = 0
+        self._conn_error = False
+        self._error_logged = False
 
     def is_available(self) -> bool:
         # Toujours disponible — pas de clé requise
@@ -75,31 +79,57 @@ class CareerjetSource(JobSource):
             ]
           }
         """
+        self._req_count += 1
         params = {
             "keywords": keyword,
             "location": location_name,
-            "affid": self.affid,
             "locale_code": "fr_FR",
             "pagesize": min(self.max_results, 20),
             "page": 1,
             "sort": "date",
         }
+        if self.affid:
+            params["affid"] = self.affid
 
         try:
             resp = requests.get(BASE_URL, params=params, timeout=15)
             if resp.status_code == 200:
                 data = resp.json()
-                # L'API retourne un type d'erreur si rien trouvé
+                self._req_ok += 1
                 if data.get("type") == "JOBS":
                     return data.get("jobs", [])
                 return []
-            logger.warning(
-                f"Careerjet : HTTP {resp.status_code} "
-                f"pour '{keyword}' @ {location_name}"
-            )
+            self._req_err += 1
+            if not self._error_logged:
+                self._error_logged = True
+                logger.warning(
+                    f"Careerjet HTTP {resp.status_code} "
+                    f"pour '{keyword}' @ {location_name}"
+                )
+            else:
+                logger.debug(
+                    f"Careerjet HTTP {resp.status_code} "
+                    f"('{keyword}' @ {location_name})"
+                )
+            return []
+        except requests.ConnectionError as e:
+            self._req_err += 1
+            self._conn_error = True
+            if not self._error_logged:
+                self._error_logged = True
+                logger.warning(
+                    "Careerjet indisponible : connexion refusée "
+                    "à public.api.careerjet.net"
+                )
+                logger.debug(f"Careerjet erreur réseau : {e}")
             return []
         except requests.RequestException as e:
-            logger.error(f"Careerjet requête : {e}")
+            self._req_err += 1
+            if not self._error_logged:
+                self._error_logged = True
+                logger.warning(f"Careerjet erreur réseau : {e}")
+            else:
+                logger.debug(f"Careerjet erreur réseau : {e}")
             return []
 
     def _parse(self, raw: dict) -> Optional[JobOffer]:
@@ -136,13 +166,23 @@ class CareerjetSource(JobSource):
     def search(
         self, keywords: list[str], locations: list[dict]
     ) -> list[JobOffer]:
+        self._req_count = 0
+        self._req_ok = 0
+        self._req_err = 0
+        self._conn_error = False
+        self._error_logged = False
+
         offers: list[JobOffer] = []
         seen: set[str] = set()
         total = len(keywords) * len(locations)
         n = 0
 
         for keyword in keywords:
+            if self._conn_error:
+                break
             for loc in locations:
+                if self._conn_error:
+                    break
                 n += 1
                 logger.debug(
                     f"[Careerjet {n}/{total}] "
@@ -154,8 +194,22 @@ class CareerjetSource(JobSource):
                         seen.add(offer.id)
                         offers.append(offer)
 
-                if n < total:
+                if n < total and not self._conn_error:
                     time.sleep(0.3)
 
-        logger.info(f"Careerjet : {len(offers)} offres uniques")
+        diag = (
+            "connexion refusée à public.api.careerjet.net"
+            if self._conn_error else ""
+        )
+        self.stats = {
+            "requests":    self._req_count,
+            "success":     self._req_ok,
+            "no_results":  0,
+            "errors":      self._req_err,
+            "error_codes": (
+                f"réseau ×{self._req_err}" if self._req_err else ""
+            ),
+            "diagnosis":   diag,
+            "offers":      len(offers),
+        }
         return offers

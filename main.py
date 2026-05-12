@@ -143,7 +143,7 @@ def run(config: dict) -> None:
     logger.info(f"Après scoring : {len(scored)} offres pertinentes")
 
     # 5. Sauvegarder (anti-doublon ID + hash)
-    new_count = save_offers(db_path, scored)
+    new_count, new_offers_list = save_offers(db_path, scored)
     logger.info(f"Nouvelles offres en base : {new_count}")
 
     # 6. Récupérer les offres récentes pour le rapport
@@ -185,6 +185,18 @@ def run(config: dict) -> None:
     )
 
     # Résumé JSON pour l'interface Streamlit
+    _preview = [
+        {
+            "title": o.title,
+            "company": o.company or "",
+            "location": o.location or "",
+            "source": o.source,
+            "score": o.score or 0,
+            "url": o.url or "",
+            "published_at": o.published_at or "",
+        }
+        for o in new_offers_list[:20]
+    ]
     _result = {
         "success": True,
         "duration": round(time.time() - _run_start, 1),
@@ -192,6 +204,7 @@ def run(config: dict) -> None:
         "total_found": sum(source_counts.values()),
         "in_report": len(recent_rows),
         "sources": {s.name: s.stats for s in sources},
+        "new_offers_preview": _preview,
     }
     try:
         _result_path = Path(db_path).parent / "last_run.json"

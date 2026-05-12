@@ -31,16 +31,16 @@ sources:
     max_results_per_keyword: 50
     use_contract_filter: false
   adzuna:
-    enabled: false
+    enabled: true
     max_results_per_keyword: 25
   jooble:
-    enabled: false
+    enabled: true
     max_results_per_keyword: 20
   careerjet:
     enabled: true
     max_results_per_keyword: 20
   themuse:
-    enabled: false
+    enabled: true
     max_results_per_keyword: 30
   brave_search:
     enabled: false
